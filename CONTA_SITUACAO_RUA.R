@@ -157,13 +157,6 @@ dbExecute(con, glue::glue("
 "))
 
 
-db <- as.data.table(  dbGetQuery(con, "
-  SELECT(*)
-  FROM cadu_merge_f
-  ;
-") )
-
-
 
 
 
