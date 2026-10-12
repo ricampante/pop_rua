@@ -3,6 +3,8 @@ library(stringi)
 library(arrow)
 library(DBI)
 library(duckdb)
+library(ggplot2)
+library(ggalluvial)
 
 
 con <- dbConnect(duckdb::duckdb())
@@ -148,13 +150,63 @@ n2 <- dbGetQuery(con, "
 ")
 
 
+# Full join por CPF: uma linha por pessoa. CPFs nulos são descartados (nunca casariam
+# e virariam "Invisível" falso). MAX dá prioridade à situação de rua se o CPF repetir.
 dbExecute(con, glue::glue("
   CREATE OR REPLACE VIEW cadu_merge_f AS
-  SELECT(*)
-  FROM cadu_merge AS l
-  LEFT JOIN cadu_merge2 AS r
-    ON l.co_familiar_fam = r.co_familiar_fam;
+  SELECT
+    COALESCE(l.nu_cpf_pessoa, r.nu_cpf_pessoa) AS nu_cpf_pessoa,
+    l.poprua,
+    r.poprua2
+  FROM (
+    SELECT nu_cpf_pessoa, MAX(poprua) AS poprua
+    FROM cadu_merge
+    WHERE nu_cpf_pessoa IS NOT NULL
+    GROUP BY nu_cpf_pessoa
+  ) AS l
+  FULL JOIN (
+    SELECT nu_cpf_pessoa, MAX(poprua2) AS poprua2
+    FROM cadu_merge2
+    WHERE nu_cpf_pessoa IS NOT NULL
+    GROUP BY nu_cpf_pessoa
+  ) AS r
+    ON l.nu_cpf_pessoa = r.nu_cpf_pessoa;
 "))
+
+#---- SANKEY: TRAJETÓRIA ENTRE DEZ/2022 E JUN/2026 ------###
+# Obs.: "Invisível" no período 2 significa que a pessoa saiu do cadastro ou ficou
+# desatualizada (fora dos filtros de data/estado cadastral), não que se tornou invisível.
+
+fluxos <- setDT(dbGetQuery(con, "
+  SELECT
+    CASE WHEN poprua  = 1 THEN 'Situação de rua' WHEN poprua  = 0 THEN 'Tem teto' ELSE 'Invisível' END AS periodo_1,
+    CASE WHEN poprua2 = 1 THEN 'Situação de rua' WHEN poprua2 = 0 THEN 'Tem teto' ELSE 'Invisível' END AS periodo_2,
+    COUNT(*) AS n
+  FROM cadu_merge_f
+  GROUP BY 1, 2
+  ORDER BY 1, 2;
+"))
+print(fluxos)
+
+niveis <- c("Situação de rua", "Tem teto", "Invisível")
+fluxos_rua <- fluxos[periodo_1 == "Situação de rua" | periodo_2 == "Situação de rua"]
+fluxos_rua[, `:=`(
+  periodo_1 = factor(periodo_1, levels = niveis),
+  periodo_2 = factor(periodo_2, levels = niveis)
+)]
+
+sankey <- ggplot(fluxos_rua, aes(axis1 = periodo_1, axis2 = periodo_2, y = n)) +
+  geom_alluvium(aes(fill = periodo_1), width = 1/6) +
+  geom_stratum(width = 1/6) +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum)), size = 3) +
+  scale_x_discrete(limits = c("dez/2022", "jun/2026"), expand = c(.1, .1)) +
+  scale_y_continuous(labels = scales::label_number(big.mark = ".")) +
+  labs(fill = "dez/2022", y = "Pessoas (CPF)",
+       title = "Trajetória das pessoas em situação de rua no CadÚnico") +
+  theme_minimal()
+
+print(sankey)
+ggsave("sankey_poprua.png", sankey, width = 9, height = 6, dpi = 300, bg = "white")
 
 
 
