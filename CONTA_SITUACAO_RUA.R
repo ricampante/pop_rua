@@ -66,7 +66,16 @@ dbExecute(con, glue::glue("
     CASE
       WHEN (in_dormir_rua_memb = 1 OR in_dormir_albergue_memb = 1)
       THEN 1 ELSE 0
-    END AS poprua
+    END AS poprua,
+    -- 2 = rua rural (rural, terra indígena ou quilombola), 1 = rua urbana, 0 = tem teto
+    CASE
+      WHEN (p.in_dormir_rua_memb = 1 OR p.in_dormir_albergue_memb = 1)
+           AND (f.co_local_domic_fam = 2 OR f.co_indigena_reside_fam = 1
+                OR f.in_familia_quilombola_fam = 1)
+      THEN 2
+      WHEN (p.in_dormir_rua_memb = 1 OR p.in_dormir_albergue_memb = 1)
+      THEN 1 ELSE 0
+    END AS situacao
   FROM cadus AS p
   LEFT JOIN cadufam AS f
     ON p.co_familiar_fam = f.co_familiar_fam;
@@ -86,7 +95,9 @@ dbExecute(con, glue::glue("
 # "))
 
 n0 <- dbGetQuery(con, "
-  SELECT SUM(poprua) AS poprua_202212 
+  SELECT SUM(poprua) AS poprua_202212,
+         SUM(CASE WHEN situacao = 1 THEN 1 ELSE 0 END) AS poprua_urbana_202212,
+         SUM(CASE WHEN situacao = 2 THEN 1 ELSE 0 END) AS poprua_rural_202212
   FROM cadu_merge
   ;
 ")
@@ -137,35 +148,49 @@ dbExecute(con, glue::glue("
     CASE
       WHEN (in_dormir_rua_memb = 1 OR in_dormir_albergue_memb = 1)
       THEN 1 ELSE 0
-    END AS poprua2
+    END AS poprua2,
+    -- 2 = rua rural (rural, terra indígena ou quilombola), 1 = rua urbana, 0 = tem teto
+    CASE
+      WHEN (p.in_dormir_rua_memb = 1 OR p.in_dormir_albergue_memb = 1)
+           AND (f.co_local_domic_fam = 2 OR f.co_indigena_reside_fam = 1
+                OR f.in_familia_quilombola_fam = 1)
+      THEN 2
+      WHEN (p.in_dormir_rua_memb = 1 OR p.in_dormir_albergue_memb = 1)
+      THEN 1 ELSE 0
+    END AS situacao2
   FROM cadus2 AS p
   LEFT JOIN cadufam2 AS f
     ON p.co_familiar_fam = f.co_familiar_fam;
 "))
 
 n2 <- dbGetQuery(con, "
-  SELECT SUM(poprua2) AS poprua_202606 
+  SELECT SUM(poprua2) AS poprua_202606,
+         SUM(CASE WHEN situacao2 = 1 THEN 1 ELSE 0 END) AS poprua_urbana_202606,
+         SUM(CASE WHEN situacao2 = 2 THEN 1 ELSE 0 END) AS poprua_rural_202606
   FROM cadu_merge2
   ;
 ")
 
 
 # Full join por CPF: uma linha por pessoa. CPFs nulos são descartados (nunca casariam
-# e virariam "Invisível" falso). MAX dá prioridade à situação de rua se o CPF repetir.
+# e virariam "Invisível" falso). MAX dá prioridade à situação de rua se o CPF repetir
+# (situacao: 0 < 1 urbana < 2 rural).
 dbExecute(con, glue::glue("
   CREATE OR REPLACE VIEW cadu_merge_f AS
   SELECT
     COALESCE(l.nu_cpf_pessoa, r.nu_cpf_pessoa) AS nu_cpf_pessoa,
     l.poprua,
-    r.poprua2
+    l.situacao,
+    r.poprua2,
+    r.situacao2
   FROM (
-    SELECT nu_cpf_pessoa, MAX(poprua) AS poprua
+    SELECT nu_cpf_pessoa, MAX(poprua) AS poprua, MAX(situacao) AS situacao
     FROM cadu_merge
     WHERE nu_cpf_pessoa IS NOT NULL
     GROUP BY nu_cpf_pessoa
   ) AS l
   FULL JOIN (
-    SELECT nu_cpf_pessoa, MAX(poprua2) AS poprua2
+    SELECT nu_cpf_pessoa, MAX(poprua2) AS poprua2, MAX(situacao2) AS situacao2
     FROM cadu_merge2
     WHERE nu_cpf_pessoa IS NOT NULL
     GROUP BY nu_cpf_pessoa
@@ -179,8 +204,8 @@ dbExecute(con, glue::glue("
 
 fluxos <- setDT(dbGetQuery(con, "
   SELECT
-    CASE WHEN poprua  = 1 THEN 'Situação de rua' WHEN poprua  = 0 THEN 'Tem teto' ELSE 'Invisível' END AS periodo_1,
-    CASE WHEN poprua2 = 1 THEN 'Situação de rua' WHEN poprua2 = 0 THEN 'Tem teto' ELSE 'Invisível' END AS periodo_2,
+    CASE situacao  WHEN 2 THEN 'Rua rural' WHEN 1 THEN 'Rua urbana' WHEN 0 THEN 'Tem teto' ELSE 'Invisível' END AS periodo_1,
+    CASE situacao2 WHEN 2 THEN 'Rua rural' WHEN 1 THEN 'Rua urbana' WHEN 0 THEN 'Tem teto' ELSE 'Invisível' END AS periodo_2,
     COUNT(*) AS n
   FROM cadu_merge_f
   GROUP BY 1, 2
@@ -188,8 +213,9 @@ fluxos <- setDT(dbGetQuery(con, "
 "))
 print(fluxos)
 
-niveis <- c("Situação de rua", "Tem teto", "Invisível")
-fluxos_rua <- fluxos[periodo_1 == "Situação de rua" | periodo_2 == "Situação de rua"]
+rua <- c("Rua urbana", "Rua rural")
+niveis <- c(rua, "Tem teto", "Invisível")
+fluxos_rua <- fluxos[periodo_1 %in% rua | periodo_2 %in% rua]
 fluxos_rua[, `:=`(
   periodo_1 = factor(periodo_1, levels = niveis),
   periodo_2 = factor(periodo_2, levels = niveis)
